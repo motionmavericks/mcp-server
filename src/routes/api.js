@@ -280,8 +280,11 @@ router.post('/servers/:id/connect', authenticateToken, (req, res) => {
     const serverId = validator.escape(req.params.id);
     const mcpManager = req.app.get('mcpManager');
     
-    const server = mcpManager.getServerStatus(tenantId, serverId);
-    if (!server) {
+    // Check if server exists in configs
+    const serverConfig = Array.from(mcpManager.serverConfigs.values())
+      .find(config => config.id === serverId && config.tenantId === tenantId);
+    
+    if (!serverConfig) {
       return res.status(404).json({ error: 'Server not found' });
     }
 
@@ -302,7 +305,7 @@ router.post('/servers/:id/connect', authenticateToken, (req, res) => {
         client: 'Use this WebSocket URL in your MCP client configuration',
         example: `{
   "mcpServers": {
-    "${server.name}": {
+    "${serverConfig.name}": {
       "command": "node",
       "args": ["path/to/mcp-client.js"],
       "env": {
