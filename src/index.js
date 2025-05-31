@@ -29,6 +29,9 @@ class MCPHostServer {
       await this.mcpManager.initialize();
       this.app.set('mcpManager', this.mcpManager);
 
+      // Trust proxy for DigitalOcean App Platform
+      this.app.set('trust proxy', true);
+
       // Apply security middleware
       this.app.use(securityHeaders);
       this.app.use(corsMiddleware);
