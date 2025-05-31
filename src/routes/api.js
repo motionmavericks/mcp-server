@@ -4,6 +4,7 @@ import { logger } from '../utils/logger.js';
 import { config } from '../config/index.js';
 import validator from 'validator';
 import rateLimit from 'express-rate-limit';
+import { PREDEFINED_SERVERS } from '../config/predefined-servers.js';
 
 const router = express.Router();
 
@@ -156,14 +157,44 @@ router.delete('/tenants/:id', authenticateAdmin, (req, res) => {
   res.json({ message: 'Tenant deleted successfully' });
 });
 
+// Get available server types
+router.get('/server-types', authenticateToken, (req, res) => {
+  try {
+    const serverTypes = Object.keys(PREDEFINED_SERVERS).map(key => ({
+      id: key,
+      name: PREDEFINED_SERVERS[key].name,
+      description: PREDEFINED_SERVERS[key].description,
+      category: PREDEFINED_SERVERS[key].category,
+      requiredEnv: PREDEFINED_SERVERS[key].requiredEnv,
+      envVars: PREDEFINED_SERVERS[key].envVars
+    }));
+    
+    res.json(serverTypes);
+  } catch (error) {
+    logger.error('List server types error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // MCP Server management endpoints
 router.get('/servers', authenticateToken, (req, res) => {
   try {
     const tenantId = req.user.tenantId;
     const mcpManager = req.app.get('mcpManager');
+    const serverRunner = req.app.get('serverRunner');
     
     const servers = mcpManager.listServers(tenantId);
-    res.json(servers);
+    
+    // Add runtime status from serverRunner
+    const enrichedServers = servers.map(server => {
+      const runtimeStatus = serverRunner.getServerStatus(server.id);
+      return {
+        ...server,
+        runtime: runtimeStatus
+      };
+    });
+    
+    res.json(enrichedServers);
 
   } catch (error) {
     logger.error('List servers error:', error);
@@ -174,15 +205,30 @@ router.get('/servers', authenticateToken, (req, res) => {
 router.post('/servers', authenticateToken, async (req, res) => {
   try {
     const tenantId = req.user.tenantId;
-    const { name, type, description, config: serverConfig } = req.body;
+    const { name, type, description, environment } = req.body;
     
     if (!name || !type) {
       return res.status(400).json({ error: 'Name and type are required' });
     }
 
-    const validTypes = ['file-manager', 'database', 'api-client', 'custom'];
-    if (!validTypes.includes(type)) {
-      return res.status(400).json({ error: 'Invalid server type' });
+    // Validate server type against predefined servers
+    if (!PREDEFINED_SERVERS[type]) {
+      return res.status(400).json({ 
+        error: 'Invalid server type',
+        availableTypes: Object.keys(PREDEFINED_SERVERS)
+      });
+    }
+
+    const serverConfig = PREDEFINED_SERVERS[type];
+    
+    // Validate required environment variables
+    for (const envVar of serverConfig.requiredEnv) {
+      if (!environment || !environment[envVar]) {
+        return res.status(400).json({ 
+          error: `Required environment variable missing: ${envVar}`,
+          requiredEnv: serverConfig.requiredEnv
+        });
+      }
     }
 
     const mcpManager = req.app.get('mcpManager');
@@ -191,7 +237,8 @@ router.post('/servers', authenticateToken, async (req, res) => {
       name: validator.escape(name),
       type,
       description: description ? validator.escape(description) : '',
-      config: serverConfig || {}
+      environment: environment || {},
+      config: serverConfig
     });
 
     // Update tenant's server list
@@ -207,7 +254,12 @@ router.post('/servers', authenticateToken, async (req, res) => {
       name,
       type,
       description,
-      status: 'created'
+      status: 'created',
+      config: {
+        name: serverConfig.name,
+        description: serverConfig.description,
+        requiredEnv: serverConfig.requiredEnv
+      }
     });
 
   } catch (error) {
@@ -252,6 +304,92 @@ router.delete('/servers/:id', authenticateToken, async (req, res) => {
     logger.info(`MCP server deleted: ${serverId}`, { tenantId });
     
     res.json({ message: 'Server deleted successfully' });
+
+  } catch (error) {
+    logger.error('Server deletion error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Server control endpoints
+router.post('/servers/:id/start', authenticateToken, async (req, res) => {
+  try {
+    const tenantId = req.user.tenantId;
+    const serverId = validator.escape(req.params.id);
+    const mcpManager = req.app.get('mcpManager');
+    const serverRunner = req.app.get('serverRunner');
+    
+    // Get server config
+    const serverConfig = Array.from(mcpManager.serverConfigs.values())
+      .find(config => config.id === serverId && config.tenantId === tenantId);
+    
+    if (!serverConfig) {
+      return res.status(404).json({ error: 'Server not found' });
+    }
+
+    // Start the server process
+    await serverRunner.startServer(serverId, serverConfig.type, serverConfig.environment);
+    
+    logger.info(`Server started: ${serverId}`, { tenantId });
+    res.json({ message: 'Server started successfully', serverId });
+
+  } catch (error) {
+    logger.error('Server start error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/servers/:id/stop', authenticateToken, async (req, res) => {
+  try {
+    const tenantId = req.user.tenantId;
+    const serverId = validator.escape(req.params.id);
+    const mcpManager = req.app.get('mcpManager');
+    const serverRunner = req.app.get('serverRunner');
+    
+    // Verify ownership
+    const serverConfig = Array.from(mcpManager.serverConfigs.values())
+      .find(config => config.id === serverId && config.tenantId === tenantId);
+    
+    if (!serverConfig) {
+      return res.status(404).json({ error: 'Server not found' });
+    }
+
+    // Stop the server process
+    await serverRunner.stopServer(serverId);
+    
+    logger.info(`Server stopped: ${serverId}`, { tenantId });
+    res.json({ message: 'Server stopped successfully', serverId });
+
+  } catch (error) {
+    logger.error('Server stop error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.get('/servers/:id/logs', authenticateToken, (req, res) => {
+  try {
+    const tenantId = req.user.tenantId;
+    const serverId = validator.escape(req.params.id);
+    const limit = parseInt(req.query.limit) || 100;
+    const mcpManager = req.app.get('mcpManager');
+    const serverRunner = req.app.get('serverRunner');
+    
+    // Verify ownership
+    const serverConfig = Array.from(mcpManager.serverConfigs.values())
+      .find(config => config.id === serverId && config.tenantId === tenantId);
+    
+    if (!serverConfig) {
+      return res.status(404).json({ error: 'Server not found' });
+    }
+
+    const logs = serverRunner.getServerLogs(serverId, limit);
+    res.json({ logs, serverId });
+
+  } catch (error) {
+    logger.error('Get server logs error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
   } catch (error) {
     logger.error('Server deletion error:', error);

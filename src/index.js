@@ -4,6 +4,7 @@ import express from 'express';
 import { config } from './config/index.js';
 import { logger } from './utils/logger.js';
 import MCPServerManager from './services/mcpServerManager.js';
+import ServerRunner from './services/serverRunner.js';
 import apiRoutes from './routes/api.js';
 import {
   corsMiddleware,
@@ -20,14 +21,16 @@ class MCPHostServer {
   constructor() {
     this.app = express();
     this.mcpManager = new MCPServerManager();
+    this.serverRunner = new ServerRunner();
     this.server = null;
   }
 
   async initialize() {
     try {
-      // Initialize MCP server manager
+      // Initialize MCP server manager and server runner
       await this.mcpManager.initialize();
       this.app.set('mcpManager', this.mcpManager);
+      this.app.set('serverRunner', this.serverRunner);
 
       // Trust proxy for DigitalOcean App Platform
       this.app.set('trust proxy', true);
@@ -153,6 +156,9 @@ Environment: ${config.nodeEnv}
         });
         logger.info('WebSocket server closed');
       }
+
+      // Stop all running server processes
+      await this.serverRunner.stopAllServers();
 
       // Close all MCP server instances
       for (const [tenantId, tenantServers] of this.mcpManager.servers.entries()) {
